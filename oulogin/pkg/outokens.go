@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -16,14 +18,14 @@ import (
 )
 
 type OidcSession struct {
-	idToken      string
-	refreshToken string
-	issuer       string
-	tokenUrl     string
-	authUrl      string
-	clientID     string
-	caCert       string
-	tlsConfig    *tls.Config
+	IDToken      string      `json:"id_token"`
+	RefreshToken string      `json:"refresh_token"`
+	Issuer       string      `json:"issuer"`
+	TokenUrl     string      `json:"token_url"`
+	AuthUrl      string      `json:"auth_url"`
+	ClientID     string      `json:"client_id"`
+	CaCert       string      `json:"ca_cert"`
+	TLSConfig    *tls.Config `json:"-"`
 }
 
 type OIDCDiscoveryDoc struct {
@@ -32,27 +34,20 @@ type OIDCDiscoveryDoc struct {
 }
 
 func NewOidcSession(issuer string, clientID string, caCert string, idToken string) (*OidcSession, error) {
-
+	var err error
 	session := &OidcSession{
-		issuer:   issuer,
-		clientID: clientID,
-		idToken:  idToken,
+		Issuer:   issuer,
+		ClientID: clientID,
+		IDToken:  idToken,
 	}
 
-	if caCert != "" {
-		caCertPool := x509.NewCertPool()
-		if !caCertPool.AppendCertsFromPEM([]byte(caCert)) {
-			return nil, fmt.Errorf("failed to append CA certificate")
-		}
-		session.tlsConfig = &tls.Config{
-			RootCAs:            caCertPool,
-			InsecureSkipVerify: true,
-		}
-	} else {
-		session.tlsConfig = &tls.Config{}
+	session.TLSConfig, err = createTLSConfig(caCert)
+
+	if err != nil {
+		return nil, err
 	}
 
-	err := session.loadUrlsFromIssuer(context.Background())
+	err = session.loadUrlsFromIssuer(context.Background())
 
 	if err != nil {
 		return nil, err
@@ -62,9 +57,23 @@ func NewOidcSession(issuer string, clientID string, caCert string, idToken strin
 
 }
 
+func createTLSConfig(caCert string) (*tls.Config, error) {
+	if caCert != "" {
+		caCertPool := x509.NewCertPool()
+		if !caCertPool.AppendCertsFromPEM([]byte(caCert)) {
+			return nil, fmt.Errorf("failed to append CA certificate")
+		}
+		return &tls.Config{
+			RootCAs:            caCertPool,
+			InsecureSkipVerify: true,
+		}, nil
+	}
+	return &tls.Config{}, nil
+}
+
 func (session *OidcSession) isTokenNeedsRefresh() (bool, error) {
 
-	token, _, err := jwt.NewParser().ParseUnverified(session.idToken, jwt.MapClaims{})
+	token, _, err := jwt.NewParser().ParseUnverified(session.IDToken, jwt.MapClaims{})
 	if err != nil {
 		return false, err
 	}
@@ -95,7 +104,7 @@ func (session *OidcSession) isTokenNeedsRefresh() (bool, error) {
 
 func (session *OidcSession) loadUrlsFromIssuer(ctx context.Context) error {
 	// Make sure issuer doesn't end with a slash
-	issuer := strings.TrimSuffix(session.issuer, "/")
+	issuer := strings.TrimSuffix(session.Issuer, "/")
 
 	discoveryURL := issuer + "/.well-known/openid-configuration"
 
@@ -107,7 +116,7 @@ func (session *OidcSession) loadUrlsFromIssuer(ctx context.Context) error {
 	client := &http.Client{Timeout: 10 * time.Second,
 
 		Transport: &http.Transport{
-			TLSClientConfig: session.tlsConfig,
+			TLSClientConfig: session.TLSConfig,
 		}}
 
 	resp, err := client.Do(req)
@@ -144,22 +153,22 @@ func (session *OidcSession) loadUrlsFromIssuer(ctx context.Context) error {
 		return fmt.Errorf("authorization_endpoint not found in discovery document")
 	}
 
-	session.authUrl = doc.AzEndpoint
-	session.tokenUrl = doc.TokenEndpoint
+	session.AuthUrl = doc.AzEndpoint
+	session.TokenUrl = doc.TokenEndpoint
 
 	return nil
 }
 
 func (session *OidcSession) refreshIdToken(ctx context.Context) (*oauth2.Token, error) {
 	config := &oauth2.Config{
-		ClientID: session.clientID,
+		ClientID: session.ClientID,
 		Endpoint: oauth2.Endpoint{
-			TokenURL: session.tokenUrl,
+			TokenURL: session.TokenUrl,
 		},
 	}
 
 	tokenSource := config.TokenSource(ctx, &oauth2.Token{
-		RefreshToken: session.refreshToken,
+		RefreshToken: session.RefreshToken,
 	})
 
 	newToken, err := tokenSource.Token()
@@ -168,4 +177,46 @@ func (session *OidcSession) refreshIdToken(ctx context.Context) (*oauth2.Token, 
 	}
 
 	return newToken, nil
+}
+
+func SaveSessionToTempFile(session *OidcSession) (string, error) {
+	tempFile, err := os.CreateTemp("", "oidcsession_*.json")
+	if err != nil {
+		return "", err
+	}
+	defer tempFile.Close()
+
+	enc := json.NewEncoder(tempFile)
+	err = enc.Encode(session)
+	if err != nil {
+		return "", err
+	}
+
+	return tempFile.Name(), nil
+}
+
+func LoadSessionFromFile(filePath string) (*OidcSession, error) {
+	f, err := os.OpenFile(filePath, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, err
+	}
+	// Lock the file until the process exits
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("could not lock session file: %w", err)
+	}
+	defer f.Close()
+	var session OidcSession
+	decoder := json.NewDecoder(f)
+	err = decoder.Decode(&session)
+	if err != nil {
+		return nil, err
+	}
+
+	session.TLSConfig, err = createTLSConfig(session.CaCert)
+	if err != nil {
+		return nil, err
+	}
+
+	return &session, nil
 }

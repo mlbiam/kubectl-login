@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -67,11 +68,11 @@ func TestIdentityProvider(t *testing.T) {
 		t.Fatalf("could init session %v", err)
 	}
 
-	if session.authUrl == "" {
+	if session.AuthUrl == "" {
 		t.Error("No authorization url")
 	}
 
-	if session.tokenUrl == "" {
+	if session.TokenUrl == "" {
 		t.Error("No token url")
 	}
 
@@ -104,7 +105,7 @@ func TestIsTokenNeedsRefresh(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			token := createTestJWT(time.Now().Add(tc.expiryDelta))
-			session := OidcSession{idToken: token}
+			session := OidcSession{IDToken: token}
 			needsRefresh, err := session.isTokenNeedsRefresh()
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -113,5 +114,69 @@ func TestIsTokenNeedsRefresh(t *testing.T) {
 				t.Errorf("expected %v, got %v", tc.expect, needsRefresh)
 			}
 		})
+	}
+}
+
+func TestSaveAndLoadSession(t *testing.T) {
+	var err error
+	session := &OidcSession{
+		IDToken:      "test-id-token",
+		RefreshToken: "test-refresh-token",
+		Issuer:       "https://example.com",
+		TokenUrl:     "https://example.com/token",
+		AuthUrl:      "https://example.com/auth",
+		ClientID:     "test-client-id",
+		CaCert:       "-----BEGIN CERTIFICATE-----\nMIIBUjCB+qADAgECAgEBMAoGCCqGSM49BAMCMBQxEjAQBgNVBAMTCTEyNy4wLjAu\nMTAeFw0yNTAzMjkxNTEwNDRaFw0yNjAzMjkxNTEwNDRaMBQxEjAQBgNVBAMTCTEy\nNy4wLjAuMTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABM2UBD7TWZmxI+Xv/ltU\nNjBbX2ibLd5rB4Jxv/n4R5kI4rPtlNMqUxxf60JEI68H+79djQ8DPRgjyHf4EweZ\nnqyjPTA7MA4GA1UdDwEB/wQEAwIHgDATBgNVHSUEDDAKBggrBgEFBQcDATAUBgNV\nHREEDTALggkxMjcuMC4wLjEwCgYIKoZIzj0EAwIDRwAwRAIgU0iGZJtnPXWzAr0W\nAc2Sa9oidWH4yHdiUfqAv5ocO20CIE3J33TtlpBHPuRCnCqtNzog9GjkDV+R4SfV\nbci8jEiv\n-----END CERTIFICATE-----",
+	}
+
+	session.TLSConfig, err = createTLSConfig(session.CaCert)
+	if err != nil {
+		t.Fatalf("failed to create TLS config: %v", err)
+	}
+
+	filePath, err := SaveSessionToTempFile(session)
+	if err != nil {
+		t.Fatalf("failed to save session: %v", err)
+	}
+	defer os.Remove(filePath)
+
+	loadedSession, err := LoadSessionFromFile(filePath)
+	if err != nil {
+		t.Fatalf("failed to load session: %v", err)
+	}
+
+	if loadedSession.IDToken != session.IDToken {
+		t.Errorf("IDToken mismatch: expected %s, got %s", session.IDToken, loadedSession.IDToken)
+	}
+	if loadedSession.RefreshToken != session.RefreshToken {
+		t.Errorf("RefreshToken mismatch: expected %s, got %s", session.RefreshToken, loadedSession.RefreshToken)
+	}
+	if loadedSession.Issuer != session.Issuer {
+		t.Errorf("Issuer mismatch: expected %s, got %s", session.Issuer, loadedSession.Issuer)
+	}
+	if loadedSession.TokenUrl != session.TokenUrl {
+		t.Errorf("TokenUrl mismatch: expected %s, got %s", session.TokenUrl, loadedSession.TokenUrl)
+	}
+	if loadedSession.AuthUrl != session.AuthUrl {
+		t.Errorf("AuthUrl mismatch: expected %s, got %s", session.AuthUrl, loadedSession.AuthUrl)
+	}
+	if loadedSession.ClientID != session.ClientID {
+		t.Errorf("ClientID mismatch: expected %s, got %s", session.ClientID, loadedSession.ClientID)
+	}
+	if loadedSession.CaCert != session.CaCert {
+		t.Errorf("CaCert mismatch")
+	}
+
+	if loadedSession.TLSConfig == nil {
+		t.Errorf("TLSConfig should not be nil")
+	} else if session.TLSConfig == nil {
+		t.Errorf("Expected TLSConfig to be initialized in original session")
+	} else {
+		if len(loadedSession.TLSConfig.RootCAs.Subjects()) != len(session.TLSConfig.RootCAs.Subjects()) {
+			t.Errorf("TLSConfig RootCAs mismatch in number of subjects")
+		}
+		if loadedSession.TLSConfig.InsecureSkipVerify != session.TLSConfig.InsecureSkipVerify {
+			t.Errorf("TLSConfig InsecureSkipVerify mismatch")
+		}
 	}
 }
