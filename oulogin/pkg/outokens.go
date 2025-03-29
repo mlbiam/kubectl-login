@@ -33,12 +33,13 @@ type OIDCDiscoveryDoc struct {
 	AzEndpoint    string `json:"authorization_endpoint"`
 }
 
-func NewOidcSession(issuer string, clientID string, caCert string, idToken string) (*OidcSession, error) {
+func NewOidcSession(issuer string, clientID string, caCert string, idToken string, refreshToken string) (*OidcSession, error) {
 	var err error
 	session := &OidcSession{
-		Issuer:   issuer,
-		ClientID: clientID,
-		IDToken:  idToken,
+		Issuer:       issuer,
+		ClientID:     clientID,
+		IDToken:      idToken,
+		RefreshToken: refreshToken,
 	}
 
 	session.TLSConfig, err = createTLSConfig(caCert)
@@ -167,6 +168,14 @@ func (session *OidcSession) refreshIdToken(ctx context.Context) (*oauth2.Token, 
 		},
 	}
 
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: session.TLSConfig,
+		},
+	}
+
+	ctx = context.WithValue(ctx, oauth2.HTTPClient, httpClient)
+
 	tokenSource := config.TokenSource(ctx, &oauth2.Token{
 		RefreshToken: session.RefreshToken,
 	})
@@ -219,4 +228,16 @@ func LoadSessionFromFile(filePath string) (*OidcSession, error) {
 	}
 
 	return &session, nil
+}
+
+func (session *OidcSession) RefreshSession(ctx context.Context) bool {
+	token, err := session.refreshIdToken(ctx)
+	if err != nil {
+		return false
+	}
+	session.IDToken = token.AccessToken
+	if token.RefreshToken != "" {
+		session.RefreshToken = token.RefreshToken
+	}
+	return true
 }

@@ -1,6 +1,7 @@
 package outokens
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
@@ -62,7 +63,7 @@ func TestIdentityProvider(t *testing.T) {
 
 	pem, _, err := getPEMFromTLSCertificate(idp.Server.TLS.Certificates[0])
 
-	session, err := NewOidcSession(idp.Issuer, "", string(pem), "")
+	session, err := NewOidcSession(idp.Issuer, "", string(pem), "", "")
 
 	if err != nil {
 		t.Fatalf("could init session %v", err)
@@ -178,5 +179,46 @@ func TestSaveAndLoadSession(t *testing.T) {
 		if loadedSession.TLSConfig.InsecureSkipVerify != session.TLSConfig.InsecureSkipVerify {
 			t.Errorf("TLSConfig InsecureSkipVerify mismatch")
 		}
+	}
+}
+
+func TestRefreshSession_Success(t *testing.T) {
+	idp, err := oulogintest.StartTestOIDCProvider()
+	if err != nil {
+		t.Fatalf("could not start idp: %v", err)
+	}
+	defer idp.Close()
+
+	cert := idp.Server.TLS.Certificates[0]
+	pem, _, err := getPEMFromTLSCertificate(cert)
+	if err != nil {
+		t.Fatalf("failed to extract cert: %v", err)
+	}
+
+	session, err := NewOidcSession(idp.Issuer, "test-client", string(pem), "", "dummy-refresh-token")
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+
+	tok := session.RefreshSession(context.Background())
+	if !tok || err != nil {
+		t.Errorf("expected successful refresh, got error: %v", err)
+	}
+
+	if session.IDToken == "" {
+		t.Error("expected ID token to be updated")
+	}
+}
+
+func TestRefreshSession_Failure(t *testing.T) {
+	session := &OidcSession{
+		ClientID:     "bad-client",
+		TokenUrl:     "https://invalid/token",
+		RefreshToken: "invalid-token",
+	}
+
+	ok := session.RefreshSession(context.Background())
+	if ok {
+		t.Errorf("expected refresh to fail, but got success")
 	}
 }

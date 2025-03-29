@@ -115,6 +115,7 @@ func (m *OIDCMock) tokenHandler(w http.ResponseWriter, r *http.Request) {
 
 	resp := map[string]string{
 		"id_token":      idToken,
+		"access_token":  idToken,
 		"refresh_token": "dummy-refresh-token",
 		"token_type":    "Bearer",
 		"expires_in":    "3600",
