@@ -2,18 +2,25 @@ package outokens
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"math/big"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/pkg/browser"
 	"golang.org/x/oauth2"
 )
 
@@ -180,28 +187,44 @@ func (session *OidcSession) refreshIdToken(ctx context.Context) (*oauth2.Token, 
 		RefreshToken: session.RefreshToken,
 	})
 
-	newToken, err := tokenSource.Token()
+	token, err := tokenSource.Token()
 	if err != nil {
+		// Check if the error is an *oauth2.RetrieveError to inspect the status code
+		var retrieveErr *oauth2.RetrieveError
+		if errors.As(err, &retrieveErr) {
+			if retrieveErr.Response != nil && retrieveErr.Response.StatusCode == http.StatusUnauthorized {
+				return nil, fmt.Errorf("refresh token rejected with 401: %w", err)
+			}
+		}
 		return nil, err
 	}
 
-	return newToken, nil
+	return token, nil
 }
 
-func SaveSessionToTempFile(session *OidcSession) (string, error) {
-	tempFile, err := os.CreateTemp("", "oidcsession_*.json")
+func SaveSessionToTempFile(session *OidcSession, customPath ...string) (string, error) {
+	var path string
+	if len(customPath) > 0 && customPath[0] != "" {
+		path = customPath[0]
+	} else {
+		tempFile, err := os.CreateTemp("", "oidc-session-*.json")
+		if err != nil {
+			return "", err
+		}
+		defer tempFile.Close()
+		path = tempFile.Name()
+	}
+
+	data, err := json.MarshalIndent(session, "", "  ")
 	if err != nil {
 		return "", err
 	}
-	defer tempFile.Close()
 
-	enc := json.NewEncoder(tempFile)
-	err = enc.Encode(session)
-	if err != nil {
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		return "", err
 	}
 
-	return tempFile.Name(), nil
+	return path, nil
 }
 
 func LoadSessionFromFile(filePath string) (*OidcSession, error) {
@@ -231,8 +254,30 @@ func LoadSessionFromFile(filePath string) (*OidcSession, error) {
 }
 
 func (session *OidcSession) RefreshSession(ctx context.Context) bool {
+	needsRefresh, err := session.isTokenNeedsRefresh()
+	if err != nil {
+		log.Printf("failed to check token expiration: %v", err)
+		return false
+	}
+	if !needsRefresh {
+		return false
+	}
+
 	token, err := session.refreshIdToken(ctx)
 	if err != nil {
+		var retrieveErr *oauth2.RetrieveError
+		if errors.As(err, &retrieveErr) {
+			if retrieveErr.Response != nil && retrieveErr.Response.StatusCode == http.StatusUnauthorized {
+				log.Println("refresh failed with 401 - unauthorized, reauthenticating")
+				err = session.handle401WithAuthCodeFlow(ctx)
+				if err != nil {
+					log.Printf("failed to reauthenticate: %v", err)
+					return false
+				}
+				log.Println("Reauthentication successful")
+				return true
+			}
+		}
 		return false
 	}
 	session.IDToken = token.AccessToken
@@ -240,4 +285,121 @@ func (session *OidcSession) RefreshSession(ctx context.Context) bool {
 		session.RefreshToken = token.RefreshToken
 	}
 	return true
+}
+
+func (session *OidcSession) handle401WithAuthCodeFlow(ctx context.Context) error {
+	// Start the redirect server
+	codeCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+	srv := &http.Server{Addr: ":8000"}
+
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		code := r.URL.Query().Get("code")
+		if code == "" {
+			http.Error(w, "Missing code", http.StatusBadRequest)
+			errCh <- fmt.Errorf("missing code in callback")
+			return
+		}
+		u, err := url.Parse(session.Issuer)
+		if err != nil {
+			http.Error(w, "Invalid issuer", http.StatusInternalServerError)
+			errCh <- fmt.Errorf("invalid issuer format: %w", err)
+			return
+		}
+		http.Redirect(w, r, fmt.Sprintf("https://%s/auth/forms/cli-login-finished.jsp", u.Host), http.StatusSeeOther)
+		codeCh <- code
+		go srv.Shutdown(context.Background())
+	})
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			errCh <- err
+		}
+	}()
+
+	// Generate nonce and PKCE
+	nonce := randomString(32)
+	codeVerifier := randomString(64)
+	h := sha256.New()
+	h.Write([]byte(codeVerifier))
+	codeChallenge := base64.RawURLEncoding.EncodeToString(h.Sum(nil))
+
+	// Build the auth URL
+	authUrl, err := url.Parse(session.AuthUrl)
+	if err != nil {
+		return err
+	}
+
+	q := authUrl.Query()
+	q.Set("response_type", "code")
+	q.Set("client_id", session.ClientID)
+	q.Set("redirect_uri", "http://localhost:8000")
+	q.Set("scope", "openid profile email")
+	q.Set("state", nonce)
+	q.Set("code_challenge", codeChallenge)
+	q.Set("code_challenge_method", "S256")
+	authUrl.RawQuery = q.Encode()
+
+	// Launch browser
+	fmt.Printf("Opening browser for authentication to %s...\n", authUrl.String())
+	openBrowser(authUrl.String())
+
+	select {
+	case code := <-codeCh:
+		// Exchange code for token
+		token, err := session.ExchangeCodeForToken(ctx, code, "http://localhost:8000/", codeVerifier)
+		if err != nil {
+			return err
+		}
+		session.IDToken = token.Extra("id_token").(string)
+		session.RefreshToken = token.RefreshToken
+		return nil
+	case err := <-errCh:
+		return err
+	case <-time.After(1 * time.Minute):
+		return fmt.Errorf("authentication timed out")
+	}
+}
+
+func randomString(length int) string {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, length)
+	for i := range b {
+		n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+		b[i] = charset[n.Int64()]
+	}
+	return string(b)
+}
+
+func openBrowser(url string) {
+
+	if err := browser.OpenURL(url); err != nil {
+		log.Printf("failed to open browser: %v", err)
+	}
+}
+
+func (session *OidcSession) ExchangeCodeForToken(ctx context.Context, code string, redirectURI, codeVerifier string) (*oauth2.Token, error) {
+	config := &oauth2.Config{
+		ClientID:    session.ClientID,
+		RedirectURL: redirectURI,
+		Endpoint: oauth2.Endpoint{
+			TokenURL: session.TokenUrl,
+		},
+		Scopes: []string{"openid", "profile", "email"},
+	}
+
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: session.TLSConfig,
+		},
+	}
+
+	ctx = context.WithValue(ctx, oauth2.HTTPClient, httpClient)
+
+	token, err := config.Exchange(ctx, code, oauth2.SetAuthURLParam("code_verifier", codeVerifier))
+	if err != nil {
+		return nil, err
+	}
+
+	return token, nil
 }

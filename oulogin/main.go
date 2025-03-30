@@ -4,39 +4,37 @@ Copyright © 2025 NAME HERE <EMAIL ADDRESS>
 package main
 
 import (
-	"bufio"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
-	"os"
 
-	oulogintest "github.com/tremolosecurity/kubectl-login/test"
+	"github.com/tremolosecurity/openunison-cli/cmd"
 )
 
 func main() {
-	//cmd.Execute()
+	cmd.Execute()
 
-	fmt.Print("Starting idp\n")
+	// fmt.Print("Starting idp\n")
 
-	idp, err := oulogintest.StartTestOIDCProvider()
+	// idp, err := oulogintest.StartTestOIDCProvider()
 
-	if err != nil {
-		panic(err)
-	}
+	// if err != nil {
+	// 	panic(err)
+	// }
 
-	fmt.Printf("Server URL: %s\n", idp.Server.URL)
-	fmt.Printf("Issuer URL: %s\n", idp.Issuer)
+	// fmt.Printf("Server URL: %s\n", idp.Server.URL)
+	// fmt.Printf("Issuer URL: %s\n", idp.Issuer)
 
-	bufio.NewReader(os.Stdin).ReadBytes('\n')
+	// bufio.NewReader(os.Stdin).ReadBytes('\n')
 
-	pem, _, _ := getPEMFromTLSCertificate(idp.Server.TLS.Certificates[0])
+	// pem, _, _ := getPEMFromTLSCertificate(idp.Server.TLS.Certificates[0])
 
-	fmt.Print(string(pem))
+	// fmt.Print(string(pem))
 
-	fmt.Print("Hit enter to shutdown")
-	idp.Close()
-	fmt.Print("Shutdown")
+	// fmt.Print("Hit enter to shutdown")
+	// idp.Close()
+	// fmt.Print("Shutdown")
 
 }
 
