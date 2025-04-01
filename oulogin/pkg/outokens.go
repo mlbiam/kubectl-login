@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -21,8 +20,19 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/pkg/browser"
+	"go.uber.org/zap"
 	"golang.org/x/oauth2"
 )
+
+var logger *zap.Logger
+
+func SetLogger(debug bool) {
+	if debug {
+		logger = zap.Must(zap.NewDevelopment())
+	} else {
+		logger = zap.Must(zap.NewProduction())
+	}
+}
 
 type OidcSession struct {
 	IDToken      string      `json:"id_token"`
@@ -137,7 +147,7 @@ func (session *OidcSession) loadUrlsFromIssuer(ctx context.Context) error {
 		return fmt.Errorf("discovery request failed with status: %s", resp.Status)
 	}
 
-	fmt.Printf(resp.Header["Content-Type"][0])
+	logger.Debug("Content-Type", zap.String("content_type", resp.Header["Content-Type"][0]))
 
 	// bodyBytes, err := io.ReadAll(resp.Body)
 	// if err != nil {
@@ -256,7 +266,7 @@ func LoadSessionFromFile(filePath string) (*OidcSession, error) {
 func (session *OidcSession) RefreshSession(ctx context.Context) bool {
 	needsRefresh, err := session.isTokenNeedsRefresh()
 	if err != nil {
-		log.Printf("failed to check token expiration: %v", err)
+		logger.Debug("failed to check token expiration", zap.Error(err))
 		return false
 	}
 	if !needsRefresh {
@@ -268,13 +278,13 @@ func (session *OidcSession) RefreshSession(ctx context.Context) bool {
 		var retrieveErr *oauth2.RetrieveError
 		if errors.As(err, &retrieveErr) {
 			if retrieveErr.Response != nil && retrieveErr.Response.StatusCode == http.StatusUnauthorized {
-				log.Println("refresh failed with 401 - unauthorized, reauthenticating")
+				logger.Debug("refresh failed with 401 - unauthorized, reauthenticating")
 				err = session.handle401WithAuthCodeFlow(ctx)
 				if err != nil {
-					log.Printf("failed to reauthenticate: %v", err)
+					logger.Debug("failed to reauthenticate", zap.Error(err))
 					return false
 				}
-				log.Println("Reauthentication successful")
+				logger.Debug("Reauthentication successful")
 				return true
 			}
 		}
@@ -341,7 +351,7 @@ func (session *OidcSession) handle401WithAuthCodeFlow(ctx context.Context) error
 	authUrl.RawQuery = q.Encode()
 
 	// Launch browser
-	fmt.Printf("Opening browser for authentication to %s...\n", authUrl.String())
+	logger.Debug("Opening browser for authentication", zap.String("url", authUrl.String()))
 	openBrowser(authUrl.String())
 
 	select {
@@ -374,7 +384,7 @@ func randomString(length int) string {
 func openBrowser(url string) {
 
 	if err := browser.OpenURL(url); err != nil {
-		log.Printf("failed to open browser: %v", err)
+		logger.Debug("failed to open browser", zap.Error(err))
 	}
 }
 

@@ -14,7 +14,7 @@ func GenerateExecCredential(token string) (*v1beta1.ExecCredential, error) {
 
 	return &v1beta1.ExecCredential{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: "client.authentication.k8s.io/v1beta1",
+			APIVersion: "client.authentication.k8s.io/v1",
 			Kind:       "ExecCredential",
 		},
 		Status: &v1beta1.ExecCredentialStatus{
